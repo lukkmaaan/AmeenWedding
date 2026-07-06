@@ -2,20 +2,30 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 const TARGET_VOLUME = 0.3 // 30% — premium, subtle ambience
 const FADE_DURATION_MS = 2500
+const INTERACTION_EVENTS = ['pointerdown', 'touchstart', 'click', 'keydown', 'scroll', 'wheel']
 
 /**
  * Drives a single persistent <audio> element for the whole site.
- * - Attempts autoplay (with fade-in) as soon as it mounts.
- * - If the browser blocks autoplay, exposes `needsInteraction` so the UI
- *   can show a "tap to begin" overlay; the first pointer interaction
- *   anywhere on the page starts playback.
- * - Because this hook (and its <audio> element) lives once at the App
- *   root, playback position is naturally preserved across scrolling —
- *   nothing here is tied to any section mounting/unmounting.
+ *
+ * Autoplay strategy (this is the actual fix):
+ * 1. Try real, audible playback on mount.
+ * 2. Browsers reject that unless the user already interacted with the page —
+ *    so if it's rejected, immediately start the SAME track muted instead.
+ *    Muted autoplay is always permitted with no gesture required, so the
+ *    track is already running, in sync, from the moment the page loads.
+ * 3. The very first scroll/click/touch/key anywhere on the page unmutes it
+ *    and fades the volume in — no click on any button required.
+ * 4. Only if even muted playback fails (very rare) do we fall back to the
+ *    "tap to begin" overlay via `needsInteraction`.
+ *
+ * Because this hook (and its single <audio> element) lives once at the App
+ * root, playback position is naturally preserved across scrolling — nothing
+ * here is tied to any section mounting/unmounting.
  */
 export default function useBackgroundMusic() {
   const audioRef = useRef(null)
   const fadeIntervalRef = useRef(null)
+  const hasInitializedRef = useRef(false) // guards React StrictMode's double-invoke
 
   const [isPlaying, setIsPlaying] = useState(false)
   const [isMuted, setIsMuted] = useState(false)
@@ -42,52 +52,99 @@ export default function useBackgroundMusic() {
     }, stepTime)
   }, [])
 
+  // Real, audible playback attempt.
   const attemptPlay = useCallback(() => {
     const audio = audioRef.current
     if (!audio) return Promise.reject(new Error('no audio element'))
 
+    audio.muted = false
     audio.volume = 0
     return audio.play().then(() => {
       setIsPlaying(true)
+      setIsMuted(false)
       setNeedsInteraction(false)
       fadeVolumeTo(TARGET_VOLUME)
     })
   }, [fadeVolumeTo])
 
-  // Try to start playback the moment the site loads.
-  useEffect(() => {
-    attemptPlay().catch(() => setNeedsInteraction(true))
-    return () => clearInterval(fadeIntervalRef.current)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  // Silent fallback — always allowed by every major browser, no gesture needed.
+  const attemptMutedPlay = useCallback(() => {
+    const audio = audioRef.current
+    if (!audio) return Promise.reject(new Error('no audio element'))
+
+    audio.muted = true
+    audio.volume = TARGET_VOLUME
+    return audio.play().then(() => {
+      setIsPlaying(true)
+      setIsMuted(true)
+    })
   }, [])
 
-  // Fallback: start on the very first scroll, touch, click, or key press
-  // anywhere on the page — no need to hit the speaker button.
   useEffect(() => {
-    if (!needsInteraction) return
+    if (hasInitializedRef.current) return
+    hasInitializedRef.current = true
 
-    const startOnInteraction = () => {
-      attemptPlay()
-        .catch(() => {
-          // Still blocked, or the mp3 hasn't been added yet — fail quietly
-          // rather than trapping the visitor behind the overlay forever.
-        })
-        .finally(() => setNeedsInteraction(false))
+    let removeListeners = () => {}
+
+    const armInteractionListeners = (handler) => {
+      INTERACTION_EVENTS.forEach((evt) =>
+        window.addEventListener(evt, handler, { once: true, passive: true })
+      )
+      removeListeners = () => {
+        INTERACTION_EVENTS.forEach((evt) => window.removeEventListener(evt, handler))
+      }
     }
 
-    const events = ['pointerdown', 'touchstart', 'click', 'keydown', 'scroll', 'wheel']
-    events.forEach((evt) =>
-      window.addEventListener(evt, startOnInteraction, { once: true, passive: true })
-    )
+    // Step 1: try real playback.
+    attemptPlay().catch(() => {
+      // Step 2: browser blocked sound — start muted instead, so the track
+      // is already running in sync from page load.
+      attemptMutedPlay()
+        .then(() => {
+          // Step 3: unmute the instant the visitor does anything at all.
+          armInteractionListeners(() => {
+            const audio = audioRef.current
+            if (!audio) return
+            audio.muted = false
+            setIsMuted(false)
+            fadeVolumeTo(TARGET_VOLUME)
+          })
+        })
+        .catch(() => {
+          // Step 4: even muted autoplay failed — genuinely need a tap.
+          setNeedsInteraction(true)
+          armInteractionListeners(() => {
+            attemptPlay()
+              .catch(() => {})
+              .finally(() => setNeedsInteraction(false))
+          })
+        })
+    })
 
     return () => {
-      events.forEach((evt) => window.removeEventListener(evt, startOnInteraction))
+      clearInterval(fadeIntervalRef.current)
+      removeListeners()
     }
-  }, [needsInteraction, attemptPlay])
+  }, [attemptPlay, attemptMutedPlay, fadeVolumeTo])
 
   const togglePlay = useCallback(() => {
     const audio = audioRef.current
     if (!audio) return
+
+    if (audio.muted) {
+      // Currently running silently (the autoplay fallback) — this click
+      // both unmutes it and guarantees it's actually playing.
+      audio.muted = false
+      setIsMuted(false)
+      setNeedsInteraction(false)
+      if (audio.paused) {
+        attemptPlay().catch(() => {})
+      } else {
+        setIsPlaying(true)
+        fadeVolumeTo(TARGET_VOLUME)
+      }
+      return
+    }
 
     if (isPlaying) {
       audio.pause()
@@ -95,7 +152,7 @@ export default function useBackgroundMusic() {
     } else {
       attemptPlay().catch(() => {})
     }
-  }, [isPlaying, attemptPlay])
+  }, [isPlaying, attemptPlay, fadeVolumeTo])
 
   const toggleMute = useCallback(() => {
     const audio = audioRef.current
