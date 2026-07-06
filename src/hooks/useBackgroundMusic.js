@@ -61,7 +61,8 @@ export default function useBackgroundMusic() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Fallback: start on the very first tap/click anywhere on the page.
+  // Fallback: start on the very first scroll, touch, click, or key press
+  // anywhere on the page — no need to hit the speaker button.
   useEffect(() => {
     if (!needsInteraction) return
 
@@ -74,8 +75,14 @@ export default function useBackgroundMusic() {
         .finally(() => setNeedsInteraction(false))
     }
 
-    window.addEventListener('pointerdown', startOnInteraction, { once: true })
-    return () => window.removeEventListener('pointerdown', startOnInteraction)
+    const events = ['pointerdown', 'touchstart', 'click', 'keydown', 'scroll', 'wheel']
+    events.forEach((evt) =>
+      window.addEventListener(evt, startOnInteraction, { once: true, passive: true })
+    )
+
+    return () => {
+      events.forEach((evt) => window.removeEventListener(evt, startOnInteraction))
+    }
   }, [needsInteraction, attemptPlay])
 
   const togglePlay = useCallback(() => {
