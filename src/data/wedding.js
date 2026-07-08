@@ -5,7 +5,7 @@ const wedding = {
   bride: 'Fathima Fidha',
   // ISO date used by the countdown — keep the timezone offset for accuracy.
   weddingDateISO: '2026-07-23T11:00:00+05:30',
-  weekday: 'Wednesday',
+  weekday: 'Thursday',
   day: '23',
   month: 'July',
   year: '2026',
